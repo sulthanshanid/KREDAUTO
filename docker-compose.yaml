@@ -1,0 +1,11 @@
+version: "3.9"
+services:
+  autoclock:
+    build: .
+    container_name: autoclock
+    restart: always
+    volumes:
+      - ./state:/app/state
+      - ./images:/app/images
+    environment:
+      - TZ=Asia/Kolkata
