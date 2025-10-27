@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y tzdata && \
 WORKDIR /app
 
 # Copy Python script and images
-COPY autoclock_india.py /app/
+COPY new.py /app/
 COPY images /app/images
 
 # Install Python dependencies
