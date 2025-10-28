@@ -53,10 +53,10 @@ HEADERS_BASE = {
 TZ = ZoneInfo("Asia/Kolkata")
 
 # windows (inclusive)
-MORNING_WINDOW_START = datetime.time(12, 41, 0)
-MORNING_WINDOW_END = datetime.time(12, 41, 0)
-EVENING_WINDOW_START = datetime.time(12, 43, 0)
-EVENING_WINDOW_END = datetime.time(12, 43, 0)
+MORNING_WINDOW_START = datetime.time(10, 8, 0)
+MORNING_WINDOW_END = datetime.time(10, 15, 0)
+EVENING_WINDOW_START = datetime.time(18, 5, 10)
+EVENING_WINDOW_END = datetime.time(18, 8, 0)
 
 PRE_ALERT_MINUTES = 10  # pre-alert before punch
 
