@@ -21,4 +21,4 @@ RUN pip install --no-cache-dir requests
 VOLUME ["/app/state"]
 
 # Start script
-CMD ["python", "tele.py"]
+CMD ["python", "-u", "tele.py"]
