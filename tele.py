@@ -23,9 +23,15 @@ import signal
 import sys
 import threading
 from zoneinfo import ZoneInfo
-
 import requests
-
+'''
+proxy = 'http://127.0.0.1:8080'
+os.environ['http_proxy'] = proxy
+os.environ['HTTP_PROXY'] = proxy
+os.environ['https_proxy'] = proxy
+os.environ['HTTPS_PROXY'] = proxy
+os.environ['REQUESTS_CA_BUNDLE'] = "C:\\Users\\User\\Desktop\\cacert.pem"
+'''
 # -------- CONFIG --------
 EMAIL = "muzu04994@gmail.com"
 PASSWORD = "Shanid@123"
@@ -138,6 +144,8 @@ def login_get_token_and_cookies():
         print(f"[{now_kolkata()}] Login succeeded, token length={len(token)} cookies={list(cookies_dict.keys())}")
     else:
         print(f"[{now_kolkata()}] Login response didn't include token JSON. Status {r.status_code}. Cookies: {list(cookies_dict.keys())}")
+        send_telegram_message("@abbpdfs", "Login iS Failing")
+        
     return token, cookies_dict
 
 
@@ -168,9 +176,9 @@ def send_punch(token, image_path):
         "auto_clock_punch": False,
         "clock_lat": 33.985805,
         "clock_long": -118.2541117,
-        "device_model_id": "SM-G977N",
-        "device_name": "samsung",
-        "os_version": "android 12",
+        "device_model_id": "A95",
+        "device_name": "OPPO",
+        "os_version": "android 13",
         "platform": "kredilylite",
         "prev_punch_count": 0,
         "real_time_lat": 0.0,
