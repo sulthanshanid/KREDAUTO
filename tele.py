@@ -296,7 +296,9 @@ def is_holiday_today(token):
 def next_event_datetime_and_type(state):
     """
     Decide next event datetime and whether it's a 'clock_in' or 'clock_out'.
-    Uses state to know whether today's morning punch was already done.
+    Uses state to know whether today's morning/evening punch was already done.
+    If evening punch was missed (e.g., restart after 6 PM), it still schedules
+    a clock_out before moving to next day's clock_in.
     """
     today = now_kolkata().date()
     date_str = state.get("date")
@@ -307,29 +309,34 @@ def next_event_datetime_and_type(state):
     morning_end_dt = datetime.datetime.combine(today, MORNING_WINDOW_END).replace(tzinfo=TZ)
     evening_end_dt = datetime.datetime.combine(today, EVENING_WINDOW_END).replace(tzinfo=TZ)
 
-    if not morning_done and now < morning_end_dt:
+    # Case 1: morning not done yet → schedule morning clock-in
+    if not morning_done and now < evening_end_dt:
         target = get_random_time_in_window(today, MORNING_WINDOW_START, MORNING_WINDOW_END)
         if target <= now:
-            if now < datetime.datetime.combine(today, EVENING_WINDOW_END).replace(tzinfo=TZ):
-                target = get_random_time_in_window(today, EVENING_WINDOW_START, EVENING_WINDOW_END)
-                return target, "clock_out"
-            else:
-                tomorrow = today + datetime.timedelta(days=1)
-                target = get_random_time_in_window(tomorrow, MORNING_WINDOW_START, MORNING_WINDOW_END)
-                return target, "clock_in"
+            # morning window passed → go for evening
+            target = get_random_time_in_window(today, EVENING_WINDOW_START, EVENING_WINDOW_END)
+            return target, "clock_out"
         return target, "clock_in"
 
-    if morning_done and not evening_done and now < evening_end_dt:
-        target = get_random_time_in_window(today, EVENING_WINDOW_START, EVENING_WINDOW_END)
-        if target <= now:
-            tomorrow = today + datetime.timedelta(days=1)
-            target = get_random_time_in_window(tomorrow, MORNING_WINDOW_START, MORNING_WINDOW_END)
-            return target, "clock_in"
-        return target, "clock_out"
+    # Case 2: morning done but evening not yet done
+    if morning_done and not evening_done:
+        # If still within or slightly after evening window, try to punch out
+        if now <= evening_end_dt + datetime.timedelta(hours=6):
+            target = get_random_time_in_window(today, EVENING_WINDOW_START, EVENING_WINDOW_END)
+            # If window already passed, punch out within next few minutes
+            if target <= now:
+                target = now + datetime.timedelta(minutes=2)
+            return target, "clock_out"
+        # Otherwise (too late), move to next morning
+        tomorrow = today + datetime.timedelta(days=1)
+        target = get_random_time_in_window(tomorrow, MORNING_WINDOW_START, MORNING_WINDOW_END)
+        return target, "clock_in"
 
+    # Case 3: both done → plan for next morning
     tomorrow = today + datetime.timedelta(days=1)
     target = get_random_time_in_window(tomorrow, MORNING_WINDOW_START, MORNING_WINDOW_END)
     return target, "clock_in"
+
 
 
 def ensure_images_structure():
