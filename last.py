@@ -66,8 +66,8 @@ EVENING_WINDOW_END = datetime.time(18, 8, 0)
 PRE_ALERT_MINUTES = 10  # pre-alert before punch
 
 # Telegram config
-BOT_TOKEN = "8025422826:AAEezLn7fN_6cisTZmvmAuMlQRwmnB3xKgw"
-CHANNEL_ID = "@kreduto"  # where photos/notifications go
+BOT_TOKEN = "8179352079:AAEbmNmkVLJvyqpIm7DK8G9BcJAn43U5_hA"
+CHANNEL_ID = "631331311"  # where photos/notifications go
 TELEGRAM_ADMIN_CHAT_ID = None
 
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
