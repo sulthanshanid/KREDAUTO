@@ -444,7 +444,7 @@ def perform_force_punch(action_type, chat_id=None):
         state = load_state()
         # decide outfit and image
         if action_type == "clock_in":
-            outfit_folder = str(random.randint(1, 6))
+            outfit_folder = str(random.randint(1, 3))
             folder_path = os.path.join(IMAGES_DIR, outfit_folder)
             image_path = choose_random_image_from_folder(folder_path)
             state["last_outfit"] = outfit_folder
@@ -454,7 +454,7 @@ def perform_force_punch(action_type, chat_id=None):
         else:
             outfit_folder = state.get("last_outfit")
             if not outfit_folder:
-                outfit_folder = str(random.randint(1, 6))
+                outfit_folder = str(random.randint(1, 3))
             folder_path = os.path.join(IMAGES_DIR, outfit_folder)
             exclude = state.get("clock_in_image")
             image_path = choose_random_image_from_folder(folder_path, exclude_filename=exclude)
@@ -808,7 +808,7 @@ def main_loop():
         # perform punch: choose image etc
         try:
             if action_type == "clock_in":
-                outfit_folder = str(random.randint(1, 6))
+                outfit_folder = str(random.randint(1, 3))
                 folder_path = os.path.join(IMAGES_DIR, outfit_folder)
                 image_path = choose_random_image_from_folder(folder_path)
                 state["last_outfit"] = outfit_folder
@@ -820,7 +820,7 @@ def main_loop():
             else:
                 outfit_folder = state.get("last_outfit")
                 if not outfit_folder:
-                    outfit_folder = str(random.randint(1, 6))
+                    outfit_folder = str(random.randint(1, 3))
                     log.warning(f"no last_outfit in state; choosing random folder {outfit_folder}")
                 folder_path = os.path.join(IMAGES_DIR, outfit_folder)
                 exclude = state.get("clock_in_image")
