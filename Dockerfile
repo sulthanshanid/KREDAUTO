@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y tzdata && \
 WORKDIR /app
 
 # Copy Python script and images
-COPY last.py /app/
+COPY final.py /app/
 COPY images /app/images
 
 # Install Python dependencies
@@ -21,4 +21,4 @@ RUN pip install --no-cache-dir requests
 VOLUME ["/app/state"]
 
 # Start script
-CMD ["python", "-u", "last.py"]
+CMD ["python", "-u", "final.py"]
