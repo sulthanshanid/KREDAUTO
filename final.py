@@ -35,7 +35,7 @@ import requests
 import logging
 
 # -------- CONFIG --------
-EMAIL = "muzu04994@gmail.com"
+EMAIL = "shanidsulthan@gmail.com"
 PASSWORD = "Shanid@123"
 
 IMAGES_DIR = "images"               # contains subfolders "1", "2", ... "6"
