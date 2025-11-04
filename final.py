@@ -447,7 +447,7 @@ def next_event_datetime_and_type(state):
 def ensure_images_structure():
     if not os.path.isdir(IMAGES_DIR):
         raise FileNotFoundError(f"Images directory '{IMAGES_DIR}' does not exist.")
-    for i in range(1, 7):
+    for i in range(1, 4):
         p = os.path.join(IMAGES_DIR, str(i))
         if not os.path.isdir(p):
             raise FileNotFoundError(f"Expected outfit folder missing: {p}")
