@@ -35,8 +35,8 @@ import requests
 import logging
 
 # -------- CONFIG --------
-EMAIL = "shanidsulthan@gmail.com"
-PASSWORD = "Shanid@123"
+EMAIL = "9544790012"
+PASSWORD = "Shanid@786"
 
 IMAGES_DIR = "images"               # contains subfolders "1", "2", ... "6"
 STATE_FILE = "state/session_state.json"   # persists token, last_outfit, clock_in_image, date, flags
@@ -272,7 +272,7 @@ def login_get_token_and_cookies_once():
     if token:
         log.info(f"Login succeeded, token length={len(token)} cookies={list(cookies_dict.keys())}")
     else:
-        log.warning(f"Login response didn't include token JSON. Status {r.status_code}. Cookies: {list(cookies_dict.keys())}")
+        log.warning(f"Login response didn't include token JSON. Status {r.status_code} {r.content}. Cookies: {list(cookies_dict.keys())}")
         try:
             send_telegram_message(CHANNEL_ID, "⚠️ Login is failing (check credentials or network).")
         except Exception:
