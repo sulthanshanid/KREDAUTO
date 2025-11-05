@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
 """
-AutoClock (India timezone) — Extended with Telegram controls
+AutoClock (India timezone) — Full script with Telegram controls and widget validation.
 
-New features in this version:
-- Force punch now: /forcein and /forceout (will pick image and perform punch immediately)
-- Retry logic for login/punch on network errors: 3 attempts with 1, 5, 10 minutes gaps
-- Holiday notifications to Telegram when detected
-- Send terminal/log file to Telegram (command /sendlog and automatic on fatal errors where possible)
-- Add photos to outfit folders via Telegram: send a photo with caption "/addphoto <folder_number>"
-- Persistent logging to autoclock.log (rotating not implemented but can be added)
-
-Usage notes:
-- Admin control: TELEGRAM_ADMIN_CHAT_ID can be set to restrict who can send commands.
-- /forcein and /forceout will update morning_done/evening_done accordingly.
-- /addphoto <n> + attach photo => saved to images/<n>/ with a timestamped filename.
-- /sendlog sends the recent log file to chat (if uploading fails, no further action).
-
-Notification style A will be used for outfit picks:
-    👕 Outfit: <n> ✅
-
+Key behavior:
+- Calls GET /ws/v1/attendance-log/clocking-widget-api/ before every punch.
+- Interprets widget['clock_in'] as "server expects clock_in next" (True => clock_in expected).
+- Clock-in allowed only if widget.clock_in == True AND prev_punch_count == 0.
+- Clock-out allowed only if widget.clock_in == False AND prev_punch_count == 1 AND last_clock_milisec present.
+- Clock-out uses the same outfit folder used at clock-in, but picks a different image.
+- All Telegram handlers preserved (/forcein, /forceout, /addphoto N, /sendlog, /status, /skip, /skiptoday, /pause, /resume, /reset).
 """
 
 import os
@@ -41,9 +31,11 @@ PASSWORD = "Shanid@786"
 IMAGES_DIR = "images"               # contains subfolders "1", "2", ... "6"
 STATE_FILE = "state/session_state.json"   # persists token, last_outfit, clock_in_image, date, flags
 os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+os.makedirs(IMAGES_DIR, exist_ok=True)
 
 LOGIN_URL = "https://app.kredily.com/ws/v1/accounts/api-token-auth/"
 PUNCH_URL = "https://app.kredily.com/ws/v1/attendance-log/punch/"
+WIDGET_URL = "https://app.kredily.com/ws/v1/attendance-log/clocking-widget-api/"
 HOLIDAY_API = "https://app.kredily.com/ws/v2/company/get-event-by-month/"  # expects ?from=<epoch_ms_of_month_start>
 
 HEADERS_BASE = {
@@ -80,7 +72,6 @@ LOG_FILE = "autoclock.log"
 RETRY_DELAYS = [0, 60, 300, 600]
 
 # ------------------------
-
 running = True
 session = requests.Session()
 state_lock = threading.Lock()
@@ -97,6 +88,7 @@ logging.basicConfig(
 log = logging.getLogger("autoclock")
 
 
+# ----------------- Helpers -----------------
 def now_kolkata():
     return datetime.datetime.now(TZ)
 
@@ -125,6 +117,17 @@ def save_state(state):
             log.exception(f"Failed to save state: {e}")
 
 
+def tail_log(lines=200):
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            all_lines = f.readlines()
+        return "".join(all_lines[-lines:])
+    except Exception as e:
+        log.exception(f"tail_log failed: {e}")
+        return ""
+
+
+# ---------- Telegram helpers ----------
 def send_telegram_message(chat_id, text):
     try:
         url = TELEGRAM_API_BASE + "/sendMessage"
@@ -178,16 +181,6 @@ def send_telegram_document(chat_id, file_path, caption=None):
         return False
 
 
-def tail_log(lines=200):
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
-            all_lines = f.readlines()
-        return "".join(all_lines[-lines:])
-    except Exception as e:
-        log.exception(f"tail_log failed: {e}")
-        return ""
-
-
 def download_telegram_file(file_id, dest_path):
     try:
         r = requests.get(f"{TELEGRAM_API_BASE}/getFile", params={"file_id": file_id}, timeout=15)
@@ -204,6 +197,7 @@ def download_telegram_file(file_id, dest_path):
         if not rr.ok:
             log.warning(f"Download file failed: {rr.status_code}")
             return False
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         with open(dest_path, "wb") as f:
             f.write(rr.content)
         return True
@@ -212,6 +206,7 @@ def download_telegram_file(file_id, dest_path):
         return False
 
 
+# ---------- Image encoding and selection ----------
 def encode_image_to_data_url(filepath):
     with open(filepath, "rb") as f:
         b = f.read()
@@ -223,22 +218,20 @@ def encode_image_to_data_url(filepath):
     elif ext == ".webp":
         mime = "image/webp"
     else:
-        mime = "image/webp"
+        mime = "image/jpeg"
     return f"data:{mime};base64," + base64.b64encode(b).decode("utf-8")
 
 
-def retry_login_attempts():
-    """Attempt login with retry delays. Returns (token, cookies) or (None, {})."""
-    for i, delay in enumerate(RETRY_DELAYS):
-        if delay:
-            log.info(f"Waiting {delay} seconds before login attempt #{i+1}")
-            time.sleep(delay)
-        token, cookies = login_get_token_and_cookies_once()
-        if token:
-            return token, cookies
-    return None, {}
+def choose_random_image_from_folder(folder_path, exclude_filename=None):
+    files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+    if exclude_filename and exclude_filename in files and len(files) > 1:
+        files = [f for f in files if f != exclude_filename]
+    if not files:
+        raise FileNotFoundError(f"No files in folder {folder_path}")
+    return os.path.join(folder_path, random.choice(files))
 
 
+# ---------- Login ----------
 def login_get_token_and_cookies_once():
     """Single attempt login; return (token, cookies_dict) or (None, {})."""
     try:
@@ -272,7 +265,7 @@ def login_get_token_and_cookies_once():
     if token:
         log.info(f"Login succeeded, token length={len(token)} cookies={list(cookies_dict.keys())}")
     else:
-        log.warning(f"Login response didn't include token JSON. Status {r.status_code} {r.content}. Cookies: {list(cookies_dict.keys())}")
+        log.warning(f"Login response didn't include token JSON. Status {getattr(r,'status_code',None)}")
         try:
             send_telegram_message(CHANNEL_ID, "⚠️ Login is failing (check credentials or network).")
         except Exception:
@@ -280,22 +273,74 @@ def login_get_token_and_cookies_once():
     return token, cookies_dict
 
 
-def send_punch_with_retries(token, image_path):
-    """Attempt punch with retries using RETRY_DELAYS schedule. Return final response or None."""
-    last_r = None
-    for i, delay in enumerate(RETRY_DELAYS):
+def retry_login_attempts():
+    """Attempt login with retry delays. Returns (token, cookies) or (None, {})."""
+    for delay in RETRY_DELAYS:
         if delay:
-            log.info(f"Waiting {delay} seconds before punch attempt #{i+1}")
+            log.info(f"Waiting {delay} seconds before login attempt")
             time.sleep(delay)
-        r = send_punch_once(token, image_path)
-        last_r = r
-        if r is not None and r.status_code == 201:
-            return r
-        # if r is None due to exception or non-201, loop to retry
-    return last_r
+        token, cookies = login_get_token_and_cookies_once()
+        if token:
+            return token, cookies
+    return None, {}
 
 
-def send_punch_once(token, image_path):
+# ---------- Widget validation ----------
+def fetch_clocking_widget(token):
+    """Return parsed JSON['data'] from the clocking-widget API or None on error."""
+    headers = HEADERS_BASE.copy()
+    if token:
+        headers["Authorization"] = f"Token {token}" if not token.startswith("Token ") else token
+    try:
+        r = session.get(WIDGET_URL, headers=headers, timeout=15)
+        if not r.ok:
+            log.warning(f"Clocking-widget GET non-OK {r.status_code}: {r.text[:200]}")
+            return None
+        js = r.json()
+        return js.get("data", {}) if isinstance(js, dict) else None
+    except Exception as e:
+        log.exception(f"fetch_clocking_widget exception: {e}")
+        return None
+
+
+def validate_widget_for_action(token, action):
+    """
+    Validate server widget before attempting action.
+    Returns (allowed:bool, prev_count:int, reason:str).
+    Interpretation:
+      - widget['clock_in'] == True  => server expects clock_in next
+      - For clock_in: require clock_in == True and prev_punch_count == 0
+      - For clock_out: require clock_in == False and prev_punch_count == 1 and last_clock_milisec present
+    """
+    data = fetch_clocking_widget(token)
+    if data is None:
+        return False, None, "Failed to fetch clocking widget"
+
+    prev = int(data.get("prev_punch_count", -1))
+    clock_in_flag = data.get("clock_in")
+    last_clock = data.get("last_clock_milisec")
+
+    # interpret clock_in_flag: True => server expects clock_in next
+    if action == "clock_in":
+        if not clock_in_flag:
+            return False, prev, "Server does not expect clock_in (already clocked in?)"
+        if prev != 0:
+            return False, prev, f"prev_punch_count != 0 ({prev})"
+    elif action == "clock_out":
+        if clock_in_flag:
+            return False, prev, "Server expects clock_in next; cannot clock_out"
+        if prev != 1:
+            return False, prev, f"prev_punch_count != 1 ({prev})"
+        if not last_clock:
+            return False, prev, "No last_clock_milisec in widget response"
+    else:
+        return False, prev, "Unknown action"
+
+    return True, prev, "OK"
+
+
+# ---------- Punch functions ----------
+def send_punch_once(token, image_path, prev_punch_count=0):
     headers = HEADERS_BASE.copy()
     if token:
         if token.startswith("Token "):
@@ -311,7 +356,7 @@ def send_punch_once(token, image_path):
         "device_name": "OPPO",
         "os_version": "android 13",
         "platform": "kredilylite",
-        "prev_punch_count": 0,
+        "prev_punch_count": prev_punch_count,
         "real_time_lat": 0.0,
         "real_time_long": 0.0,
         "selfie_image": encode_image_to_data_url(image_path)
@@ -324,24 +369,27 @@ def send_punch_once(token, image_path):
         return None
 
 
-def choose_random_image_from_folder(folder_path, exclude_filename=None):
-    files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
-    if not files:
-        raise FileNotFoundError(f"No files in folder {folder_path}")
-    if exclude_filename and exclude_filename in files and len(files) > 1:
-        files = [f for f in files if f != exclude_filename]
-    if not files:
-        raise FileNotFoundError(f"No available images in folder after excluding {exclude_filename}")
-    return os.path.join(folder_path, random.choice(files))
+def send_punch_with_retries(token, image_path, prev_punch_count=0):
+    """Attempt punch with retries using RETRY_DELAYS schedule. Return final response or None."""
+    last_r = None
+    for i, delay in enumerate(RETRY_DELAYS):
+        if delay:
+            log.info(f"Waiting {delay} seconds before punch attempt #{i+1}")
+            time.sleep(delay)
+        r = send_punch_once(token, image_path, prev_punch_count)
+        last_r = r
+        if r is not None and getattr(r, "status_code", None) == 201:
+            return r
+    return last_r
 
 
+# ---------- Outfit selection & image prep ----------
 def select_outfit_folder(state):
     """Select an outfit folder (string) while avoiding last day's folder.
     Updates state['last_used_folder'] and returns the chosen folder as string.
     """
     folders = [str(i) for i in range(1, 7)]
     last = state.get("last_used_folder")
-    # normalize to str
     last = str(last) if last is not None else None
     available = [f for f in folders if f != last]
     if not available:
@@ -349,7 +397,7 @@ def select_outfit_folder(state):
     else:
         chosen = random.choice(available)
     state["last_used_folder"] = chosen
-    # notify via Telegram (style A)
+    save_state(state)
     try:
         send_telegram_message(CHANNEL_ID, f"👕 Outfit: {chosen} ✅")
     except Exception:
@@ -357,32 +405,39 @@ def select_outfit_folder(state):
     return chosen
 
 
-def get_random_time_in_window(date: datetime.date, start_time: datetime.time, end_time: datetime.time):
-    start_dt = datetime.datetime.combine(date, start_time).replace(tzinfo=TZ)
-    end_dt = datetime.datetime.combine(date, end_time).replace(tzinfo=TZ)
-    total_seconds = int((end_dt - start_dt).total_seconds())
-    if total_seconds < 0:
-        return start_dt
-    offset = random.randint(0, total_seconds)
-    return start_dt + datetime.timedelta(seconds=offset)
+def pick_clock_in_image(state):
+    outfit_folder = select_outfit_folder(state)
+    folder_path = os.path.join(IMAGES_DIR, outfit_folder)
+    image_path = choose_random_image_from_folder(folder_path)
+    state["clock_in_image"] = os.path.basename(image_path)
+    state["last_used_folder"] = outfit_folder
+    state["morning_done"] = True
+    state["date"] = now_date_str()
+    save_state(state)
+    return image_path
 
 
-def sleep_until(target_dt: datetime.datetime):
-    while running:
-        now = now_kolkata()
-        seconds = (target_dt - now).total_seconds()
-        if seconds <= 0:
-            return
-        time.sleep(min(30, max(0.5, seconds)))
+def pick_clock_out_image(state):
+    outfit_folder = state.get("last_used_folder")
+    if not outfit_folder:
+        # fallback: pick a folder (shouldn't happen normally)
+        outfit_folder = select_outfit_folder(state)
+    folder_path = os.path.join(IMAGES_DIR, outfit_folder)
+    exclude = state.get("clock_in_image")
+    image_path = choose_random_image_from_folder(folder_path, exclude_filename=exclude)
+    state["evening_done"] = True
+    state["date"] = now_date_str()
+    save_state(state)
+    return image_path
 
 
+# ---------- Holidays ----------
 def month_start_epoch_ms(dt: datetime.datetime):
     mstart = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return int(mstart.timestamp() * 1000)
 
 
 def fetch_holidays(token):
-    """Fetch events for current month. Return list of events (dicts) or empty list."""
     headers = HEADERS_BASE.copy()
     if token:
         headers["Authorization"] = f"Token {token}" if not token.startswith("Token ") else token
@@ -400,7 +455,6 @@ def fetch_holidays(token):
 
 
 def is_holiday_today(token):
-    """Return (bool, event) where event is the matching dict or None."""
     events = fetch_holidays(token)
     today_ms = int(now_kolkata().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
     for ev in events:
@@ -410,6 +464,26 @@ def is_holiday_today(token):
         except Exception:
             continue
     return False, None
+
+
+# ---------- Scheduling helpers ----------
+def get_random_time_in_window(date: datetime.date, start_time: datetime.time, end_time: datetime.time):
+    start_dt = datetime.datetime.combine(date, start_time).replace(tzinfo=TZ)
+    end_dt = datetime.datetime.combine(date, end_time).replace(tzinfo=TZ)
+    total_seconds = int((end_dt - start_dt).total_seconds())
+    if total_seconds < 0:
+        return start_dt
+    offset = random.randint(0, total_seconds)
+    return start_dt + datetime.timedelta(seconds=offset)
+
+
+def sleep_until(target_dt: datetime.datetime):
+    while running:
+        now = now_kolkata()
+        seconds = (target_dt - now).total_seconds()
+        if seconds <= 0:
+            return
+        time.sleep(min(30, max(0.5, seconds)))
 
 
 def next_event_datetime_and_type(state):
@@ -447,47 +521,20 @@ def next_event_datetime_and_type(state):
 def ensure_images_structure():
     if not os.path.isdir(IMAGES_DIR):
         raise FileNotFoundError(f"Images directory '{IMAGES_DIR}' does not exist.")
-    for i in range(1, 4):
+    # require at least 1..3 folders to exist (you can expand to 1..6)
+    for i in range(1, 7):
         p = os.path.join(IMAGES_DIR, str(i))
         if not os.path.isdir(p):
-            raise FileNotFoundError(f"Expected outfit folder missing: {p}")
+            os.makedirs(p, exist_ok=True)
 
 
-def graceful_shutdown(signum, frame):
-    global running
-    log.info(f"Received signal {signum}, shutting down gracefully...")
-    running = False
-
-
-# --- new: perform an immediate forced punch (used by telegram commands) ---
-
+# ---------- Force punch (validating widget first) ----------
 def perform_force_punch(action_type, chat_id=None):
-    """Perform an immediate punch ("clock_in" or "clock_out").
-    Returns True if success, False otherwise. If chat_id provided, send Telegram feedback.
-    """
+    """Perform an immediate punch ("clock_in" or "clock_out")."""
     try:
         state = load_state()
-        # decide outfit and image
-        if action_type == "clock_in":
-            outfit_folder = select_outfit_folder(state)
-            folder_path = os.path.join(IMAGES_DIR, outfit_folder)
-            image_path = choose_random_image_from_folder(folder_path)
-            state["clock_in_image"] = os.path.basename(image_path)
-            state["morning_done"] = True
-            state["date"] = now_date_str()
-        else:
-            # ensure we use the same folder as earlier in the day
-            outfit_folder = state.get("last_used_folder")
-            if not outfit_folder:
-                outfit_folder = select_outfit_folder(state)
-            folder_path = os.path.join(IMAGES_DIR, outfit_folder)
-            exclude = state.get("clock_in_image")
-            image_path = choose_random_image_from_folder(folder_path, exclude_filename=exclude)
-            state["evening_done"] = True
-            state["date"] = now_date_str()
 
-        save_state(state)
-
+        # ensure token
         token = state.get("token")
         if not token:
             token, cookies = retry_login_attempts()
@@ -496,8 +543,28 @@ def perform_force_punch(action_type, chat_id=None):
                 state["cookies"] = cookies
                 save_state(state)
 
-        r = send_punch_with_retries(token, image_path)
-        if r is not None and r.status_code == 201:
+        # validate widget
+        allowed, prev_count, reason = validate_widget_for_action(state.get("token"), action_type)
+        if not allowed:
+            msg = f"⏳ Cannot perform {action_type}: {reason}"
+            log.info(msg)
+            if chat_id:
+                send_telegram_message(chat_id, msg)
+            else:
+                send_telegram_message(CHANNEL_ID, msg)
+            return False
+
+        # choose image AFTER validation
+        if action_type == "clock_in":
+            image_path = pick_clock_in_image(state)
+            log.info(f"FORCED CLOCK-IN using {image_path}")
+        else:
+            image_path = pick_clock_out_image(state)
+            log.info(f"FORCED CLOCK-OUT using {image_path}")
+
+        # send punch using prev_count from server
+        r = send_punch_with_retries(state.get("token"), image_path, prev_punch_count=prev_count)
+        if r is not None and getattr(r, "status_code", None) == 201:
             try:
                 send_telegram_photo(CHANNEL_ID, image_path, caption=f"✅ FORCED {action_type.replace('clock_', '').upper()} at {now_kolkata().strftime('%I:%M %p')}")
             except Exception:
@@ -507,9 +574,9 @@ def perform_force_punch(action_type, chat_id=None):
             log.info(f"Forced {action_type} successful.")
             return True
         else:
-            log.warning(f"Forced {action_type} failed. Final response: {r.status_code if r else 'N/A'}")
+            log.warning(f"Forced {action_type} failed. Final response: {getattr(r,'status_code', 'N/A')}")
             if chat_id:
-                send_telegram_message(chat_id, f"❌ Forced {action_type.replace('clock_', '')} failed. See log for details.")
+                send_telegram_message(chat_id, f"❌ Forced {action_type.replace('clock_', '')} failed. See log.")
             return False
 
     except Exception as e:
@@ -519,8 +586,7 @@ def perform_force_punch(action_type, chat_id=None):
         return False
 
 
-# --- Telegram listener updates: accept new commands and photo uploads ---
-
+# ---------- Telegram listener ----------
 def telegram_command_listener():
     print(f"[{now_kolkata()}] Telegram listener started.")
     offset = None
@@ -559,21 +625,18 @@ def telegram_command_listener():
 
                 # handle photo uploads: user sends photo with caption "/addphoto N"
                 if "photo" in msg and (text.lower().startswith("/addphoto") or (msg.get("caption") and msg.get("caption").lower().startswith("/addphoto"))):
-                    # caption may be in msg['caption'] or in text
                     caption_text = msg.get("caption") or text
                     parts = caption_text.split()
                     folder = None
                     if len(parts) >= 2 and parts[1].isdigit():
                         folder = parts[1]
-                    if not folder:
+                    if not folder or not (1 <= int(folder) <= 6):
                         send_telegram_message(chat_id, "Please use caption: /addphoto <folder_number> (1..6).")
                     else:
                         photos = msg.get("photo")
-                        # choose highest resolution photo
                         file_id = photos[-1].get("file_id")
                         dest_folder = os.path.join(IMAGES_DIR, folder)
-                        if not os.path.isdir(dest_folder):
-                            os.makedirs(dest_folder, exist_ok=True)
+                        os.makedirs(dest_folder, exist_ok=True)
                         filename = f"telegram_{int(time.time())}_{random.randint(1000,9999)}.jpg"
                         dest_path = os.path.join(dest_folder, filename)
                         ok = download_telegram_file(file_id, dest_path)
@@ -637,6 +700,13 @@ def telegram_command_listener():
             log.exception(f"Telegram listener exception: {e}")
             time.sleep(5)
     log.info("Telegram listener stopped.")
+
+
+# ---------- Main loop ----------
+def graceful_shutdown(signum, frame):
+    global running
+    log.info(f"Received signal {signum}, shutting down gracefully...")
+    running = False
 
 
 def main_loop():
@@ -831,28 +901,28 @@ def main_loop():
             save_state(state)
             continue
 
-        # perform punch: choose image etc
+        # BEFORE selecting images: validate widget to avoid double-punch
+        allowed, prev_count, reason = validate_widget_for_action(state.get("token"), action_type)
+        if not allowed:
+            msg = f"⚠️ Scheduled {action_type} skipped: {reason}"
+            log.info(msg)
+            send_telegram_message(CHANNEL_ID, msg)
+            # mark done appropriately to avoid repeated attempts? we skip current event only
+            if action_type == "clock_in":
+                state["morning_done"] = False
+            else:
+                state["evening_done"] = False
+            save_state(state)
+            continue
+
+        # perform punch: choose image etc (image chosen AFTER validation)
         try:
             if action_type == "clock_in":
-                outfit_folder = select_outfit_folder(state)
-                folder_path = os.path.join(IMAGES_DIR, outfit_folder)
-                image_path = choose_random_image_from_folder(folder_path)
-                state["clock_in_image"] = os.path.basename(image_path)
-                state["morning_done"] = True
-                state["date"] = now_date_str()
-                save_state(state)
-                log.info(f"CLOCK-IN using folder {outfit_folder}, image {os.path.basename(image_path)}")
+                image_path = pick_clock_in_image(state)
+                log.info(f"CLOCK-IN using image {image_path}")
             else:
-                outfit_folder = state.get("last_used_folder")
-                if not outfit_folder:
-                    outfit_folder = select_outfit_folder(state)
-                folder_path = os.path.join(IMAGES_DIR, outfit_folder)
-                exclude = state.get("clock_in_image")
-                image_path = choose_random_image_from_folder(folder_path, exclude_filename=exclude)
-                state["evening_done"] = True
-                state["date"] = now_date_str()
-                save_state(state)
-                log.info(f"CLOCK-OUT using same folder {outfit_folder}, image {os.path.basename(image_path)}")
+                image_path = pick_clock_out_image(state)
+                log.info(f"CLOCK-OUT using image {image_path}")
 
             # ensure token
             token = state.get("token")
@@ -863,35 +933,35 @@ def main_loop():
                     state["cookies"] = cookies
                     save_state(state)
 
-            r = send_punch_with_retries(token, image_path)
-            if r is None or r.status_code != 201:
-                log.warning(f"Punch attempt status {r.status_code if r else 'N/A'}. Response: {r.text[:400] if r else 'N/A'}")
+            r = send_punch_with_retries(token, image_path, prev_punch_count=prev_count)
+            if r is None or getattr(r, "status_code", None) != 201:
+                log.warning(f"Punch attempt status {getattr(r,'status_code', 'N/A')}. Response: {getattr(r,'text', 'N/A')[:400] if r else 'N/A'}")
                 log.info("Punch failed or non-201. Will attempt re-login and retry once.")
                 token, cookies = retry_login_attempts()
                 if token:
                     state["token"] = token
                     state["cookies"] = cookies
                     save_state(state)
-                    r = send_punch_with_retries(token, image_path)
+                    r = send_punch_with_retries(token, image_path, prev_punch_count=prev_count)
 
             if r is None:
                 log.error("Final punch attempt raised exception.")
                 send_telegram_message(CHANNEL_ID, f"❌ Punch attempt raised exception at {now_kolkata().strftime('%Y-%m-%d %H:%M:%S')}.")
             else:
-                if r.status_code == 201:
+                if getattr(r, "status_code", None) == 201:
                     try:
                         resp = r.json()
                         log.info(f"Punch SUCCESS. Response summary: {json.dumps(resp)[:400]}")
                         send_telegram_photo(CHANNEL_ID, image_path, caption=f"✅ {action_type.replace('clock_', '').upper()} successful at {now_kolkata().strftime('%I:%M %p')}")
                     except Exception:
-                        log.info(f"Punch SUCCESS. Raw body truncated: {r.text[:400]}")
-                        send_telegram_message(CHANNEL_ID, f"✅ {action_type.replace('clock_', '').UPPER()} successful (response not JSON).")
+                        log.info(f"Punch SUCCESS. Raw body truncated: {getattr(r,'text','')[:400]}")
+                        send_telegram_message(CHANNEL_ID, f"✅ {action_type.replace('clock_', '').upper()} successful (response not JSON).")
                 else:
-                    log.error(f"Punch FAILED after retry. Status {r.status_code}. Response: {r.text[:800]}")
-                    send_telegram_message(CHANNEL_ID, f"❌ Punch FAILED. Status {r.status_code}.")
+                    log.error(f"Punch FAILED after retry. Status {getattr(r,'status_code', 'N/A')}. Response: {getattr(r,'text','')[:800]}")
+                    send_telegram_message(CHANNEL_ID, f"❌ Punch FAILED. Status {getattr(r,'status_code','N/A')}.")
+
         except Exception as exc:
             log.exception(f"Unexpected error during scheduled action: {exc}")
-            # try to send the log file when unexpected fatal error occurs
             try:
                 send_telegram_message(CHANNEL_ID, f"❌ Unexpected error during scheduled action: {exc}")
                 send_telegram_document(CHANNEL_ID, LOG_FILE, caption="AutoClock error log")
@@ -919,7 +989,6 @@ if __name__ == "__main__":
         main_loop()
     except Exception as e:
         log.exception(f"Fatal error: {e}")
-        # attempt to send log to telegram (best effort)
         try:
             send_telegram_message(CHANNEL_ID, f"🔥 Fatal error in AutoClock: {e}")
             send_telegram_document(CHANNEL_ID, LOG_FILE, caption="AutoClock fatal log")
