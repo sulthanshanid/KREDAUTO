@@ -350,8 +350,8 @@ def send_punch_once(token, image_path, prev_punch_count=0):
     body = {
         "app_version": "2.12.2",
         "auto_clock_punch": False,
-        "clock_lat": 33.985805,
-        "clock_long": -118.2541117,
+        "clock_lat": 8.5397988,
+        "clock_long": 76.8934938,
         "device_model_id": "A95",
         "device_name": "OPPO",
         "os_version": "android 13",
