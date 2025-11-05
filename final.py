@@ -388,7 +388,7 @@ def select_outfit_folder(state):
     """Select an outfit folder (string) while avoiding last day's folder.
     Updates state['last_used_folder'] and returns the chosen folder as string.
     """
-    folders = [str(i) for i in range(1, 7)]
+    folders = [str(i) for i in range(1, 4)]
     last = state.get("last_used_folder")
     last = str(last) if last is not None else None
     available = [f for f in folders if f != last]
@@ -522,7 +522,7 @@ def ensure_images_structure():
     if not os.path.isdir(IMAGES_DIR):
         raise FileNotFoundError(f"Images directory '{IMAGES_DIR}' does not exist.")
     # require at least 1..3 folders to exist (you can expand to 1..6)
-    for i in range(1, 7):
+    for i in range(1, 4):
         p = os.path.join(IMAGES_DIR, str(i))
         if not os.path.isdir(p):
             os.makedirs(p, exist_ok=True)
