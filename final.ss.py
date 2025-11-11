@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-AutoClock (India timezone) — Patched script.
+AutoClock (India timezone) — Full script with Telegram controls and widget validation.
 
-Changes made:
-- Keeps using the clocking-widget API as the source of truth.
-- After a successful punch (HTTP 201), poll the widget API a few times (timeout/backoff)
-  to confirm the server updated prev_punch_count / clock_in. If it doesn't, fall back
-  to the punch response's clockWidget and update local state to avoid scheduling the wrong next event.
-- Ensure /forceout uses the same outfit folder as the corresponding clock-in if still valid for today.
-- Retry Telegram and web requests up to 2 attempts.
-- Send Telegram notification on Sunday & company holiday.
-- Rotate/truncate the log file so it only keeps the last 2 days' entries.
+Key behavior:
+- Calls GET /ws/v1/attendance-log/clocking-widget-api/ before every punch.
+- Interprets widget['clock_in'] as "server expects clock_in next" (True => clock_in expected).
+- Clock-in allowed only if widget.clock_in == True AND prev_punch_count == 0.
+- Clock-out allowed only if widget.clock_in == False AND prev_punch_count == 1 AND last_clock_milisec present.
+- Clock-out uses the same outfit folder used at clock-in, but picks a different image.
+- All Telegram handlers preserved (/forcein, /forceout, /addphoto N, /sendlog, /status, /skip, /skiptoday, /pause, /resume, /reset).
 """
 
 import os
@@ -22,7 +20,6 @@ import datetime
 import signal
 import sys
 import threading
-import re
 from zoneinfo import ZoneInfo
 import requests
 import logging
@@ -130,102 +127,83 @@ def tail_log(lines=200):
         return ""
 
 
-# ---------- Safe web request helper (2 attempts) ----------
-def safe_request(method, url, max_attempts=2, backoff=2, **kwargs):
-    """Simple wrapper to retry a requests.request call up to max_attempts (default 2)."""
-    for attempt in range(1, max_attempts + 1):
-        try:
-            r = session.request(method, url, **kwargs)
-            if r.ok:
-                return r
-            else:
-                log.warning(f"Request {method} {url} returned {r.status_code} on attempt {attempt}: {r.text[:200]}")
-        except Exception as e:
-            log.exception(f"Request exception {method} {url} attempt {attempt}: {e}")
-        if attempt < max_attempts:
-            time.sleep(backoff)
-    log.error(f"Request {method} {url} failed after {max_attempts} attempts.")
-    return None
-
-
-# ---------- Telegram helpers (2 attempts) ----------
+# ---------- Telegram helpers ----------
 def send_telegram_message(chat_id, text):
-    for attempt in range(1, 3):
-        try:
-            url = TELEGRAM_API_BASE + "/sendMessage"
-            payload = {"chat_id": chat_id, "text": text}
-            r = safe_request("POST", url, json=payload, timeout=10)
-            if r and r.ok:
-                return True
-        except Exception as e:
-            log.exception(f"Telegram sendMessage exception attempt {attempt}: {e}")
-        time.sleep(2)
-    log.error(f"Telegram sendMessage failed after retries: {text[:80]}")
-    return False
+    try:
+        url = TELEGRAM_API_BASE + "/sendMessage"
+        payload = {"chat_id": chat_id, "text": text}
+        r = requests.post(url, json=payload, timeout=10)
+        if r.ok:
+            return True
+        else:
+            log.warning(f"Telegram sendMessage failed: {r.status_code} {r.text}")
+            return False
+    except Exception as e:
+        log.exception(f"Telegram sendMessage exception: {e}")
+        return False
 
 
 def send_telegram_photo(chat_id, image_path, caption=None):
-    for attempt in range(1, 3):
-        try:
-            url = TELEGRAM_API_BASE + "/sendPhoto"
-            with open(image_path, "rb") as image_file:
-                files = {"photo": image_file}
-                data = {"chat_id": chat_id}
-                if caption:
-                    data["caption"] = caption
-                r = safe_request("POST", url, data=data, files=files, timeout=30)
-            if r and r.ok:
-                return True
-        except Exception as e:
-            log.exception(f"sendPhoto exception attempt {attempt}: {e}")
-        time.sleep(2)
-    log.error(f"sendPhoto ultimately failed for {image_path}")
-    return False
+    try:
+        url = TELEGRAM_API_BASE + "/sendPhoto"
+        with open(image_path, "rb") as image_file:
+            files = {"photo": image_file}
+            data = {"chat_id": chat_id}
+            if caption:
+                data["caption"] = caption
+            r = requests.post(url, data=data, files=files, timeout=30)
+        if r.ok:
+            return True
+        else:
+            log.warning(f"sendPhoto failed: {r.status_code} {r.text}")
+            return False
+    except Exception as e:
+        log.exception(f"sendPhoto exception: {e}")
+        return False
 
 
 def send_telegram_document(chat_id, file_path, caption=None):
-    for attempt in range(1, 3):
-        try:
-            url = TELEGRAM_API_BASE + "/sendDocument"
-            with open(file_path, "rb") as f:
-                files = {"document": f}
-                data = {"chat_id": chat_id}
-                if caption:
-                    data["caption"] = caption
-                r = safe_request("POST", url, data=data, files=files, timeout=60)
-            if r and r.ok:
-                return True
-        except Exception as e:
-            log.exception(f"sendDocument exception attempt {attempt}: {e}")
-        time.sleep(2)
-    log.error(f"sendDocument ultimately failed for {file_path}")
-    return False
+    try:
+        url = TELEGRAM_API_BASE + "/sendDocument"
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {"chat_id": chat_id}
+            if caption:
+                data["caption"] = caption
+            r = requests.post(url, data=data, files=files, timeout=60)
+        if r.ok:
+            return True
+        else:
+            log.warning(f"sendDocument failed: {r.status_code} {r.text}")
+            return False
+    except Exception as e:
+        log.exception(f"sendDocument exception: {e}")
+        return False
 
 
 def download_telegram_file(file_id, dest_path):
-    for attempt in range(1, 3):
-        try:
-            r = safe_request("GET", f"{TELEGRAM_API_BASE}/getFile", params={"file_id": file_id}, timeout=15)
-            if not r:
-                continue
-            js = r.json()
-            file_path = js.get("result", {}).get("file_path")
-            if not file_path:
-                log.warning("No file_path in getFile response")
-                continue
-            url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-            rr = safe_request("GET", url, timeout=30)
-            if not rr:
-                continue
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            with open(dest_path, "wb") as f:
-                f.write(rr.content)
-            return True
-        except Exception as e:
-            log.exception(f"download_telegram_file exception attempt {attempt}: {e}")
-        time.sleep(2)
-    log.error(f"download_telegram_file failed for file_id {file_id}")
-    return False
+    try:
+        r = requests.get(f"{TELEGRAM_API_BASE}/getFile", params={"file_id": file_id}, timeout=15)
+        if not r.ok:
+            log.warning(f"getFile failed: {r.status_code} {r.text}")
+            return False
+        js = r.json()
+        file_path = js.get("result", {}).get("file_path")
+        if not file_path:
+            log.warning("No file_path in getFile response")
+            return False
+        url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        rr = requests.get(url, timeout=30)
+        if not rr.ok:
+            log.warning(f"Download file failed: {rr.status_code}")
+            return False
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(rr.content)
+        return True
+    except Exception as e:
+        log.exception(f"download_telegram_file exception: {e}")
+        return False
 
 
 # ---------- Image encoding and selection ----------
@@ -257,13 +235,11 @@ def choose_random_image_from_folder(folder_path, exclude_filename=None):
 def login_get_token_and_cookies_once():
     """Single attempt login; return (token, cookies_dict) or (None, {})."""
     try:
-        r = safe_request("POST", LOGIN_URL, headers=HEADERS_BASE,
-                         json={"consent": True, "password": PASSWORD, "username": EMAIL}, timeout=20)
+        r = session.post(LOGIN_URL, headers=HEADERS_BASE, json={
+            "consent": True, "password": PASSWORD, "username": EMAIL
+        }, timeout=20)
     except Exception as e:
         log.exception(f"Login exception: {e}")
-        return None, {}
-
-    if not r:
         return None, {}
 
     cookies_dict = {c.name: c.value for c in r.cookies}
@@ -309,17 +285,14 @@ def retry_login_attempts():
     return None, {}
 
 
-# ---------- Widget validation & fetch ----------
+# ---------- Widget validation ----------
 def fetch_clocking_widget(token):
     """Return parsed JSON['data'] from the clocking-widget API or None on error."""
     headers = HEADERS_BASE.copy()
     if token:
         headers["Authorization"] = f"Token {token}" if not token.startswith("Token ") else token
     try:
-        r = safe_request("GET", WIDGET_URL, headers=headers, timeout=15)
-        if not r:
-            log.warning("Clocking-widget GET failed (no response).")
-            return None
+        r = session.get(WIDGET_URL, headers=headers, timeout=15)
         if not r.ok:
             log.warning(f"Clocking-widget GET non-OK {r.status_code}: {r.text[:200]}")
             return None
@@ -334,7 +307,10 @@ def validate_widget_for_action(token, action):
     """
     Validate server widget before attempting action.
     Returns (allowed:bool, prev_count:int, reason:str).
-    Note: server may be eventually consistent; caller should poll after punch success.
+    Interpretation:
+      - widget['clock_in'] == True  => server expects clock_in next
+      - For clock_in: require clock_in == True and prev_punch_count == 0
+      - For clock_out: require clock_in == False and prev_punch_count == 1 and last_clock_milisec present
     """
     data = fetch_clocking_widget(token)
     if data is None:
@@ -344,46 +320,23 @@ def validate_widget_for_action(token, action):
     clock_in_flag = data.get("clock_in")
     last_clock = data.get("last_clock_milisec")
 
+    # interpret clock_in_flag: True => server expects clock_in next
     if action == "clock_in":
-        if clock_in_flag is True and prev == 0:
-            return True, prev, "OK"
-        # allow borderline where server returns unexpected flag but prev==0 (trust prev_count)
-        if prev == 0:
-            return True, prev, "OK (prev_count==0, trusting prev_count despite clock_in flag)"
-        return False, prev, f"Widget not suitable for clock_in: clock_in={clock_in_flag}, prev={prev}"
+        if not clock_in_flag:
+            return False, prev, "Server does not expect clock_in (already clocked in?)"
+        if prev != 0:
+            return False, prev, f"prev_punch_count != 0 ({prev})"
     elif action == "clock_out":
-        if clock_in_flag is False and prev == 1 and last_clock:
-            return True, prev, "OK"
-        # some servers may show clock_in True but prev==1 (inconsistent) -> disallow but provide reason
-        return False, prev, f"Widget not suitable for clock_out: clock_in={clock_in_flag}, prev={prev}, last_clock_present={bool(last_clock)}"
+        if clock_in_flag:
+            return False, prev, "Server expects clock_in next; cannot clock_out"
+        if prev != 1:
+            return False, prev, f"prev_punch_count != 1 ({prev})"
+        if not last_clock:
+            return False, prev, "No last_clock_milisec in widget response"
     else:
         return False, prev, "Unknown action"
 
-
-# ---------- Poll widget until updated ----------
-def poll_widget_until_updated(token, expect_prev_count=None, expect_clock_in=None, timeout=30, interval=3):
-    """
-    Poll the clocking-widget until it matches expected prev_count and clock_in flag,
-    or until timeout (seconds) is reached. Returns the latest widget dict or None.
-    If expect_* is None, that condition is ignored.
-    """
-    deadline = time.time() + timeout
-    last = None
-    while time.time() < deadline:
-        w = fetch_clocking_widget(token)
-        if w is None:
-            last = None
-        else:
-            last = w
-            try:
-                ok_prev = True if expect_prev_count is None else (int(w.get("prev_punch_count", -1)) == int(expect_prev_count))
-            except Exception:
-                ok_prev = False
-            ok_clock = True if expect_clock_in is None else (w.get("clock_in") == expect_clock_in)
-            if ok_prev and ok_clock:
-                return w
-        time.sleep(interval)
-    return last
+    return True, prev, "OK"
 
 
 # ---------- Punch functions ----------
@@ -409,12 +362,33 @@ def send_punch_once(token, image_path, prev_punch_count=0):
         "selfie_image": encode_image_to_data_url(image_path)
     }
     try:
-        r = safe_request("POST", PUNCH_URL, headers=headers, json=body, timeout=30)
+        r = session.post(PUNCH_URL, headers=headers, json=body, timeout=30)
         return r
     except Exception as e:
         log.exception(f"Punch request exception: {e}")
         return None
 
+def poll_widget_until_updated(token, expect_prev_count=None, expect_clock_in=None, timeout=30, interval=3):
+    """
+    Poll the clocking-widget until it matches expected prev_count and clock_in flag,
+    or until timeout (seconds) is reached. Returns the latest widget dict or None.
+    If expect_* is None, that condition is ignored.
+    """
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        w = fetch_clocking_widget(token)
+        if w is None:
+            last = None
+        else:
+            last = w
+            ok_prev = True if expect_prev_count is None else (int(w.get("prev_punch_count", -1)) == int(expect_prev_count))
+            ok_clock = True if expect_clock_in is None else (w.get("clock_in") == expect_clock_in)
+            if ok_prev and ok_clock:
+                return w
+        time.sleep(interval)
+    # timed out, return whatever we last saw (may be None)
+    return last
 
 def send_punch_with_retries(token, image_path, prev_punch_count=0):
     """Attempt punch with retries using RETRY_DELAYS schedule. Return final response or None."""
@@ -432,14 +406,11 @@ def send_punch_with_retries(token, image_path, prev_punch_count=0):
 
 # ---------- Outfit selection & image prep ----------
 def select_outfit_folder(state):
-    """
-    Select an outfit folder while avoiding last day's folder, but if last_used_folder exists and date matches today, reuse it.
+    """Select an outfit folder (string) while avoiding last day's folder.
+    Updates state['last_used_folder'] and returns the chosen folder as string.
     """
     folders = [str(i) for i in range(1, 4)]
     last = state.get("last_used_folder")
-    # If last_used_folder exists and date is today, reuse it (so forceout uses same)
-    if last and state.get("date") == now_date_str():
-        return last
     last = str(last) if last is not None else None
     available = [f for f in folders if f != last]
     if not available:
@@ -493,10 +464,7 @@ def fetch_holidays(token):
         headers["Authorization"] = f"Token {token}" if not token.startswith("Token ") else token
     params = {"from": str(month_start_epoch_ms(now_kolkata()))}
     try:
-        r = safe_request("GET", HOLIDAY_API, headers=headers, params=params, timeout=20)
-        if not r:
-            log.warning("Holiday fetch failed (no response).")
-            return []
+        r = session.get(HOLIDAY_API, headers=headers, params=params, timeout=20)
         if not r.ok:
             log.warning(f"Holiday fetch non-OK {r.status_code}: {r.text[:200]}")
             return []
@@ -612,56 +580,12 @@ def perform_force_punch(action_type, chat_id=None):
             image_path = pick_clock_in_image(state)
             log.info(f"FORCED CLOCK-IN using {image_path}")
         else:
-            # ensure we reuse today's last_used_folder if present
             image_path = pick_clock_out_image(state)
             log.info(f"FORCED CLOCK-OUT using {image_path}")
 
         # send punch using prev_count from server
         r = send_punch_with_retries(state.get("token"), image_path, prev_punch_count=prev_count)
         if r is not None and getattr(r, "status_code", None) == 201:
-            # Poll widget for server consistency and update state accordingly
-            expected_prev = 1 if action_type == "clock_in" else 0
-            expected_clock_in_flag = False if action_type == "clock_in" else True
-            widget_after = poll_widget_until_updated(state.get("token"), expect_prev_count=expected_prev,
-                                                    expect_clock_in=expected_clock_in_flag,
-                                                    timeout=30, interval=3)
-            try:
-                if widget_after:
-                    # set local flags based on action
-                    if action_type == "clock_in":
-                        state["morning_done"] = True
-                    else:
-                        state["evening_done"] = True
-                    save_state(state)
-                    log.info("Forced punch succeeded and widget updated.")
-                else:
-                    # fallback to punch response's clockWidget
-                    resp_json = None
-                    try:
-                        resp_json = r.json()
-                    except Exception:
-                        resp_json = None
-                    cw = None
-                    if isinstance(resp_json, dict):
-                        cw = resp_json.get("clockWidget") or resp_json.get("clock_widget") or None
-                    if cw:
-                        if action_type == "clock_in":
-                            state["morning_done"] = True
-                        else:
-                            state["evening_done"] = True
-                        save_state(state)
-                        log.info("Forced punch succeeded; updated local state from punch response clockWidget.")
-                    else:
-                        # conservatively mark done locally
-                        if action_type == "clock_in":
-                            state["morning_done"] = True
-                        else:
-                            state["evening_done"] = True
-                        save_state(state)
-                        log.info("Forced punch succeeded; widget did not update; marked action done locally.")
-            except Exception:
-                log.exception("Error updating state after forced punch.")
-
             try:
                 send_telegram_photo(CHANNEL_ID, image_path, caption=f"✅ FORCED {action_type.replace('clock_', '').upper()} at {now_kolkata().strftime('%I:%M %p')}")
             except Exception:
@@ -693,11 +617,7 @@ def telegram_command_listener():
             params = {"timeout": 20}
             if offset:
                 params["offset"] = offset
-            r = safe_request("GET", url, params=params, timeout=30)
-            if not r:
-                log.warning("getUpdates failed: no response")
-                time.sleep(5)
-                continue
+            r = requests.get(url, params=params, timeout=30)
             if not r.ok:
                 log.warning(f"getUpdates failed: {r.status_code} {r.text[:200]}")
                 time.sleep(5)
@@ -781,13 +701,6 @@ def telegram_command_listener():
                         f"Token present: {bool(token)}\n",
                         f"Last outfit: {st.get('last_used_folder')}\n",
                     ]
-                    # append config info
-                    status_msg.append("\nConfig:\n")
-                    status_msg.append(f"Email: {EMAIL}\n")
-                    status_msg.append(f"Timezone: {TZ}\n")
-                    status_msg.append(f"Morning window: {MORNING_WINDOW_START} - {MORNING_WINDOW_END}\n")
-                    status_msg.append(f"Evening window: {EVENING_WINDOW_START} - {EVENING_WINDOW_END}\n")
-                    status_msg.append(f"Channel ID: {CHANNEL_ID}\n")
                     send_telegram_message(chat_id, "".join(status_msg))
                 elif text.startswith("/forcein"):
                     send_telegram_message(chat_id, "Performing forced clock-in now...")
@@ -810,38 +723,6 @@ def telegram_command_listener():
     log.info("Telegram listener stopped.")
 
 
-# ---------- Log rotation: keep last N days ----------
-def rotate_log(days=2):
-    """
-    Truncate LOG_FILE to keep only entries from the last `days` days.
-    Expects log lines starting with [YYYY-MM-DD ...
-    """
-    try:
-        if not os.path.exists(LOG_FILE):
-            return
-        cutoff_date = (now_kolkata() - datetime.timedelta(days=days)).date()
-        kept = []
-        date_pattern = re.compile(r"^\[(\d{4}-\d{2}-\d{2})")
-        with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
-            for ln in f:
-                m = date_pattern.match(ln)
-                if not m:
-                    # keep non-matching lines (be conservative)
-                    kept.append(ln)
-                    continue
-                try:
-                    ln_date = datetime.date.fromisoformat(m.group(1))
-                    if ln_date >= cutoff_date:
-                        kept.append(ln)
-                except Exception:
-                    kept.append(ln)
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            f.writelines(kept)
-        log.info(f"Log rotation completed. Kept entries since {cutoff_date.isoformat()}.")
-    except Exception as e:
-        log.exception(f"Log rotation failed: {e}")
-
-
 # ---------- Main loop ----------
 def graceful_shutdown(signum, frame):
     global running
@@ -856,21 +737,14 @@ def main_loop():
 
     ensure_images_structure()
 
-    # rotate logs once at startup to keep last 2 days only
-    rotate_log(days=2)
-
     # start telegram listener
     t = threading.Thread(target=telegram_command_listener, daemon=True)
     t.start()
 
     state = load_state()
     if state.get("date") != now_date_str():
-        # preserve last_used_folder across date roll unless both morning & evening done yesterday
-        last_folder = state.get("last_used_folder")
         state = {"date": now_date_str(), "morning_done": False, "evening_done": False,
                  "paused": False, "skip_next": False, "skip_today": False}
-        if last_folder:
-            state["last_used_folder"] = last_folder
         save_state(state)
 
     token = state.get("token")
@@ -884,27 +758,16 @@ def main_loop():
     log.info(f"AutoClock started (India timezone).")
 
     while running:
-        # rotate logs periodically (once per loop iteration is fine)
-        try:
-            rotate_log(days=2)
-        except Exception:
-            pass
-
         # refresh state
         state = load_state()
-        # if date rolled, reset daily flags but keep last_used_folder if present
+        # if date rolled, reset daily flags
         if state.get("date") != now_date_str():
-            last_folder = state.get("last_used_folder")
-            state = {
-                "date": now_date_str(),
-                "morning_done": False,
-                "evening_done": False,
-                "paused": state.get("paused", False),
-                "skip_next": False,
-                "skip_today": False,
-            }
-            if last_folder:
-                state["last_used_folder"] = last_folder
+            state["date"] = now_date_str()
+            state["morning_done"] = False
+            state["evening_done"] = False
+            state["skip_today"] = False
+            state.pop("last_outfit", None)
+            state.pop("clock_in_image", None)
             save_state(state)
 
         # if paused, sleep and continue
@@ -913,13 +776,9 @@ def main_loop():
             time.sleep(30)
             continue
 
-        # Sunday handling
+        # skip Sundays entirely
         if now_kolkata().weekday() == 6:  # Sunday == 6
             log.info("Today is Sunday. Skipping scheduling for today.")
-            try:
-                send_telegram_message(CHANNEL_ID, "☀️ Today is Sunday. AutoClock will skip punches.")
-            except Exception:
-                log.exception("Failed to send Sunday notification.")
             state["morning_done"] = True
             state["evening_done"] = True
             save_state(state)
@@ -932,10 +791,7 @@ def main_loop():
         if is_hol:
             title = ev.get("title", "Holiday")
             log.info(f"Today is company holiday: {title}. Skipping punches.")
-            try:
-                send_telegram_message(CHANNEL_ID, f"📅 Today is company holiday: {title}. AutoClock will skip punches.")
-            except Exception:
-                log.exception("Failed to send holiday notification.")
+            send_telegram_message(CHANNEL_ID, f"📅 Today is company holiday: {title}. AutoClock will skip punches.")
             state["morning_done"] = True
             state["evening_done"] = True
             save_state(state)
@@ -974,7 +830,6 @@ def main_loop():
         # If pre-alert time is in the future, wait until pre-alert and then send notification.
         if pre_alert_dt > now:
             log.info(f"Sleeping until pre-alert at {pre_alert_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            send_telegram_message(CHANNEL_ID, f"Sleeping until pre-alert at {pre_alert_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
             sleep_until(pre_alert_dt)
             if not running:
                 break
@@ -1003,10 +858,7 @@ def main_loop():
             token = state.get("token")
             is_hol, ev = is_holiday_today(token)
             if is_hol:
-                try:
-                    send_telegram_message(CHANNEL_ID, f"📅 Today became a holiday ({ev.get('title','Holiday')}). Skipping punches.")
-                except Exception:
-                    log.exception("Failed to send holiday notification at pre-alert time.")
+                send_telegram_message(CHANNEL_ID, f"📅 Today became a holiday ({ev.get('title','Holiday')}). Skipping punches.")
                 state["morning_done"] = True
                 state["evening_done"] = True
                 save_state(state)
@@ -1031,7 +883,6 @@ def main_loop():
 
         # Sleep until actual target
         log.info(f"Sleeping until actual punch time {target_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        send_telegram_message(CHANNEL_ID, f"Sleeping until pre-alert at {target_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         sleep_until(target_dt)
         if not running:
             break
@@ -1077,7 +928,11 @@ def main_loop():
             msg = f"⚠️ Scheduled {action_type} skipped: {reason}"
             log.info(msg)
             send_telegram_message(CHANNEL_ID, msg)
-            # don't mark done automatically; leave flags unchanged
+            # mark done appropriately to avoid repeated attempts? we skip current event only
+            if action_type == "clock_in":
+                state["morning_done"] = False
+            else:
+                state["evening_done"] = False
             save_state(state)
             continue
 
@@ -1115,63 +970,17 @@ def main_loop():
                 send_telegram_message(CHANNEL_ID, f"❌ Punch attempt raised exception at {now_kolkata().strftime('%Y-%m-%d %H:%M:%S')}.")
             else:
                 if getattr(r, "status_code", None) == 201:
-                    # Poll widget for server consistency and update state accordingly
-                    expected_prev = 1 if action_type == "clock_in" else 0
-                    expected_clock_in_flag = False if action_type == "clock_in" else True
-                    widget_after = poll_widget_until_updated(state.get("token"), expect_prev_count=expected_prev,
-                                                            expect_clock_in=expected_clock_in_flag,
-                                                            timeout=30, interval=3)
-
-                    resp_json = None
                     try:
-                        resp_json = r.json()
-                    except Exception:
-                        resp_json = None
-
-                    if widget_after:
-                        # Update state from the widget for local scheduling correctness
-                        try:
-                            if action_type == "clock_in":
-                                state["morning_done"] = True
-                            else:
-                                state["evening_done"] = True
-                            save_state(state)
-                        except Exception:
-                            log.exception("Failed to update state after widget poll.")
-                        log.info(f"Punch SUCCESS and widget updated. Response summary: {json.dumps(resp_json)[:400] if resp_json else getattr(r, 'text', '')[:400]}")
-                    else:
-                        # widget didn't update in time — fallback to the punch response's clockWidget if available
-                        log.warning("Punch succeeded but widget did not reflect update within timeout. Falling back to punch response clockWidget if present.")
-                        cw = None
-                        if isinstance(resp_json, dict):
-                            cw = resp_json.get("clockWidget") or resp_json.get("clock_widget") or None
-                        if cw:
-                            try:
-                                # set local flags conservatively based on what the server reported in the punch response
-                                if action_type == "clock_in":
-                                    state["morning_done"] = True
-                                else:
-                                    state["evening_done"] = True
-                                save_state(state)
-                                log.info("Updated local state from punch response clockWidget.")
-                            except Exception:
-                                log.exception("Failed to update state from punch response clockWidget.")
-                        else:
-                            # No clockWidget — still mark local done so next event doesn't move to next day incorrectly
-                            if action_type == "clock_in":
-                                state["morning_done"] = True
-                            else:
-                                state["evening_done"] = True
-                            save_state(state)
-                            log.info("No clockWidget in response — conservatively marking the action done locally.")
-
-                    try:
+                        resp = r.json()
+                        log.info(f"Punch SUCCESS. Response summary: {json.dumps(resp)[:400]}")
                         send_telegram_photo(CHANNEL_ID, image_path, caption=f"✅ {action_type.replace('clock_', '').upper()} successful at {now_kolkata().strftime('%I:%M %p')}")
                     except Exception:
-                        log.exception("Failed to send success photo.")
+                        log.info(f"Punch SUCCESS. Raw body truncated: {getattr(r,'text','')[:400]}")
+                        send_telegram_message(CHANNEL_ID, f"✅ {action_type.replace('clock_', '').upper()} successful (response not JSON).")
                 else:
                     log.error(f"Punch FAILED after retry. Status {getattr(r,'status_code', 'N/A')}. Response: {getattr(r,'text','')[:800]}")
                     send_telegram_message(CHANNEL_ID, f"❌ Punch FAILED. Status {getattr(r,'status_code','N/A')}.")
+
         except Exception as exc:
             log.exception(f"Unexpected error during scheduled action: {exc}")
             try:
@@ -1189,9 +998,6 @@ def main_loop():
                          "skip_next": False, "skip_today": False}
             if token_keep:
                 new_state["token"] = token_keep
-            # intentionally clear clock_in_image but keep last_used_folder for reference next day
-            if state.get("last_used_folder"):
-                new_state["last_used_folder"] = state.get("last_used_folder")
             save_state(new_state)
 
         time.sleep(2)
