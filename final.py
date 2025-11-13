@@ -433,26 +433,35 @@ def send_punch_with_retries(token, image_path, prev_punch_count=0):
 # ---------- Outfit selection & image prep ----------
 def select_outfit_folder(state):
     """
-    Select an outfit folder while avoiding last day's folder, but if last_used_folder exists and date matches today, reuse it.
+    Always avoid using yesterday's last_used_folder.
+    Even if last_used_folder is reset to None for new day,
+    keep yesterday's folder separately to prevent re-selection.
     """
     folders = [str(i) for i in range(1, 4)]
-    last = state.get("last_used_folder")
-    # If last_used_folder exists and date is today, reuse it (so forceout uses same)
-    if last and state.get("date") == now_date_str():
-        return last
-    last = str(last) if last is not None else None
-    available = [f for f in folders if f != last]
+
+    # This stores yesterday's outfit (saved in state)
+    yesterday_folder = state.get("yesterday_last_folder")
+
+    # For a new day, do NOT reuse yesterday's folder
+    available = [f for f in folders if f != yesterday_folder]
+
+    # Safety: if somehow everything excluded, fallback to all
     if not available:
-        chosen = random.choice(folders)
-    else:
-        chosen = random.choice(available)
+        available = folders
+
+    chosen = random.choice(available)
+
+    # save chosen as today's last_used_folder
     state["last_used_folder"] = chosen
     save_state(state)
+
     try:
         send_telegram_message(CHANNEL_ID, f"👕 Outfit: {chosen} ✅")
     except Exception:
         log.exception("Failed to send outfit notification")
+
     return chosen
+
 
 
 def pick_clock_in_image(state):
@@ -865,13 +874,26 @@ def main_loop():
 
     state = load_state()
     if state.get("date") != now_date_str():
-        # preserve last_used_folder across date roll unless both morning & evening done yesterday
-        last_folder = state.get("last_used_folder")
-        state = {"date": now_date_str(), "morning_done": False, "evening_done": False,
-                 "paused": False, "skip_next": False, "skip_today": False}
-        if last_folder:
-            state["last_used_folder"] = last_folder
+    # store yesterday's last outfit so today's picker avoids it
+        yesterday = state.get("last_used_folder")
+
+        state = {
+            "date": now_date_str(),
+            "morning_done": False,
+            "evening_done": False,
+            "paused": state.get("paused", False),
+            "skip_next": False,
+            "skip_today": False,
+
+            # today's outfit not selected yet
+            "last_used_folder": None,
+            "clock_in_image": None,
+
+            # memory of yesterday's outfit
+            "yesterday_last_folder": yesterday
+        }
         save_state(state)
+
 
     token = state.get("token")
     if not token:
@@ -894,7 +916,9 @@ def main_loop():
         state = load_state()
         # if date rolled, reset daily flags but keep last_used_folder if present
         if state.get("date") != now_date_str():
-            last_folder = state.get("last_used_folder")
+            # store yesterday's last outfit so today's picker avoids it
+            yesterday = state.get("last_used_folder")
+
             state = {
                 "date": now_date_str(),
                 "morning_done": False,
@@ -902,10 +926,16 @@ def main_loop():
                 "paused": state.get("paused", False),
                 "skip_next": False,
                 "skip_today": False,
+
+                # today's outfit not selected yet
+                "last_used_folder": None,
+                "clock_in_image": None,
+
+                # memory of yesterday's outfit
+                "yesterday_last_folder": yesterday
             }
-            if last_folder:
-                state["last_used_folder"] = last_folder
             save_state(state)
+
 
         # if paused, sleep and continue
         if state.get("paused", False):
