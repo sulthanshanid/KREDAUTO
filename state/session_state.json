@@ -1,10 +1,18 @@
 {
   "date": "2025-11-14",
+  "token": "efe93969fc96d29fcb9a36c96f869af9077f50c8",
+  "cookies": {
+    "DOMAINIDENTITY": "\"G8FSqQToal7tkVcH0euyYQ==\"",
+    "sessionid": "evgb31hwohfvqdtyivv1njtd57tyvhvh"
+  },
+  "last_used_folder": null,
+  "yesterday_last_folder": null,
+  "clock_in_image": null,
   "morning_done": true,
   "evening_done": false,
   "paused": false,
   "skip_next": false,
   "skip_today": false,
-  "token": "efe93969fc96d29fcb9a36c96f869af9077f50c8",
-  "last_used_folder": "2"
+  "consecutive_telegram_failures": 0,
+  "last_widget_snapshot": null
 }
