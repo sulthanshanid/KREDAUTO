@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y tzdata && \
 WORKDIR /app
 
 # Copy Python script and images
+COPY state /app/state
 COPY final.py /app/
 COPY images /app/images
 
