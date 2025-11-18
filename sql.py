@@ -751,21 +751,40 @@ def telegram_command_listener():
                 elif text.startswith("/status"):
                     st = get_state()
                     last = last_punch_today()
+
+                    # Get next event (safe even if DB empty)
+                    try:
+                        next_dt, next_action = next_event_datetime_and_type_db()
+                        next_event_info = f"{next_action} at {next_dt.strftime('%I:%M %p')}"
+                    except Exception:
+                        next_event_info = "Unknown (DB empty or error)"
+
                     status_msg = [
-                        f"Date: {st.get('date')}\n",
-                        f"Paused: {st.get('paused', False)}\n",
-                        f"Skip next: {st.get('skip_next', False)}\n",
-                        f"Skip today: {st.get('skip_today', False)}\n",
-                        f"Last punch today: {last['action'] if last else 'None'}\n",
-                        f"Morning done: {st.get('morning_done', False)}\n",
-                        f"Evening done: {st.get('evening_done', False)}\n",
-                        f"Token present: {bool(st.get('token'))}\n",
-                        f"Last outfit folder: {st.get('last_used_folder')}\n",
-                        f"Yesterday outfit folder: {st.get('yesterday_last_folder')}\n",
+                        "📊 *AutoClock Status Summary*\n\n",
+                        f"📅 Date: {st.get('date')}\n",
+                        f"⏸️ Paused: {st.get('paused', False)}\n",
+                        f"⏭️ Skip next: {st.get('skip_next', False)}\n",
+                        f"🚫 Skip today: {st.get('skip_today', False)}\n",
+                        f"🕒 Last punch today: {last['action'] if last else 'None'}\n",
+                        f"🌅 Morning done: {st.get('morning_done', False)}\n",
+                        f"🌇 Evening done:   {st.get('evening_done', False)}\n",
+                        "\n",
+                        f"👕 Today outfit folder:      {st.get('last_used_folder')}\n",
+                        f"👕 Yesterday outfit folder:  {st.get('yesterday_last_folder')}\n",
+                        "\n",
+                        f"⭐ Preferred folder override: {st.get('preferred_folder')}\n",
+                        f"⭐ Preferred image override:  {st.get('preferred_image')}\n",
+                        "\n",
+                        f"🔐 Token present:  {bool(st.get('token'))}\n",
+                        f"🍪 Cookies present: {bool(st.get('cookies'))}\n",
+                        "\n",
+                        f"📌 *Next scheduled*: {next_event_info}\n",
+                        "\n",
+                        "⚙️  *Config:*\n",
+                        f" - Email: {EMAIL}\n",
+                        f" - Timezone: {TZ}\n",
                     ]
-                    status_msg.append('\nConfig:\n')
-                    status_msg.append(f"Email: {EMAIL}\n")
-                    status_msg.append(f"Timezone: {TZ}\n")
+
                     notify(''.join(status_msg), chat_id)
 
                 elif text.startswith("/forcein"):
