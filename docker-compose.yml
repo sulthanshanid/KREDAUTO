@@ -16,8 +16,8 @@ services:
 
     # Persist state DB and images
     volumes:
-      - ./state:/app/state
-      - ./images:/app/images
+      - /home/smartboys/KREDAUTO/state:/app/state
+      - /home/smartboys/KREDAUTO/images:/app/images
 
     # Optional: limit CPU/RAM
     # deploy:
