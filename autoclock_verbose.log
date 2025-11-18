@@ -1,0 +1,9 @@
+[2025-11-18 11:28:25,130] INFO: Telegram sender thread started (DB-backed queue).
+[2025-11-18 11:28:25,130] INFO: Telegram command listener started.
+[2025-11-18 11:28:26,416] INFO: Login succeeded.
+[2025-11-18 11:28:26,710] INFO: Next event computed: clock_out at 2025-11-18T18:05:37+05:30
+[2025-11-18 11:28:31,175] DEBUG: telegram sendMessage ok
+[2025-11-18 11:28:31,639] DEBUG: telegram sendMessage ok
+[2025-11-18 11:29:11,726] INFO: Telegram sender thread stopped.
+[2025-11-18 11:29:26,367] INFO: Telegram command listener stopped.
+[2025-11-18 11:29:26,728] INFO: AutoClock main loop stopped.

@@ -1,25 +1,27 @@
-# Use a lightweight ARM-compatible Python base for Raspberry Pi
+# Lightweight ARM-compatible Python base (works on Raspberry Pi)
 FROM python:3.11-slim
 
-# Set timezone to India (Asia/Kolkata)
+# Set timezone
 ENV TZ=Asia/Kolkata
 RUN apt-get update && apt-get install -y tzdata && \
-    ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && dpkg-reconfigure -f noninteractive tzdata && \
+    ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && \
+    dpkg-reconfigure -f noninteractive tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-# Set work directory
+# Create app directory
 WORKDIR /app
 
-# Copy Python script and images
-COPY state /app/state
-COPY final.py /app/
-COPY images /app/images
+# Copy main script
+COPY sql.py /app/autoclock.py
 
-# Install Python dependencies
+# Install dependencies
 RUN pip install --no-cache-dir requests
 
-# Ensure state file persists (will be mounted as volume)
-VOLUME ["/app/state"]
+# Create persistent directories (will be overridden by volumes)
+RUN mkdir -p /app/state /app/images
 
-# Start script
-CMD ["python", "-u", "final.py"]
+# Declare volumes for SQLite DB + images
+VOLUME ["/app/state", "/app/images"]
+
+# Run script
+CMD ["python", "-u", "/app/autoclock.py"]

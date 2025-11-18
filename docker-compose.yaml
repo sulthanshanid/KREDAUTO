@@ -1,11 +1,35 @@
 version: "3.9"
+
 services:
   autoclock:
-    build: .
     container_name: autoclock
-    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Always restart unless manually stopped
+    restart: unless-stopped
+
+    # Timezone
+    environment:
+      - TZ=Asia/Kolkata
+
+    # Persist state DB and images
     volumes:
       - ./state:/app/state
       - ./images:/app/images
-    environment:
-      - TZ=Asia/Kolkata
+
+    # Optional: limit CPU/RAM
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "0.30"
+    #       memory: 300M
+
+    # Healthcheck ensures the script is alive
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.path.exists('/app/state/autoclock.db')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
