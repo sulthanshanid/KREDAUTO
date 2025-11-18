@@ -727,22 +727,27 @@ def telegram_command_listener():
                     update_state(skip_next=1)
                     changed = True
                     notify("✅ Next scheduled punch will be skipped.", chat_id)
+
                 elif text.startswith("/todayskip") or text.startswith("/skiptoday"):
                     update_state(skip_today=1)
                     changed = True
                     notify("✅ All punches for today will be skipped.", chat_id)
+
                 elif text.startswith("/pause"):
                     update_state(paused=1)
                     changed = True
                     notify("⏸️ Automation paused. Use /resume to resume.", chat_id)
+
                 elif text.startswith("/resume"):
                     update_state(paused=0)
                     changed = True
                     notify("▶️ Automation resumed.", chat_id)
+
                 elif text.startswith("/reset"):
                     update_state(skip_today=0, skip_next=0, paused=0)
                     changed = True
                     notify("▶️ Reset Done.", chat_id)
+
                 elif text.startswith("/status"):
                     st = get_state()
                     last = last_punch_today()
@@ -762,19 +767,115 @@ def telegram_command_listener():
                     status_msg.append(f"Email: {EMAIL}\n")
                     status_msg.append(f"Timezone: {TZ}\n")
                     notify(''.join(status_msg), chat_id)
+
                 elif text.startswith("/forcein"):
                     notify("Performing forced clock-in now...", chat_id)
                     threading.Thread(target=perform_force_punch, args=("clock_in", chat_id), daemon=True).start()
+
                 elif text.startswith("/forceout"):
                     notify("Performing forced clock-out now...", chat_id)
                     threading.Thread(target=perform_force_punch, args=("clock_out", chat_id), daemon=True).start()
+
                 elif text.startswith("/sendlog"):
                     notify("Uploading recent log...", chat_id)
-                    threading.Thread(target=lambda: tg_send_document(chat_id, LOG_FILE, caption="Recent AutoClock log"), daemon=True).start()
+                    threading.Thread(
+                        target=lambda: tg_send_document(chat_id, LOG_FILE, caption="Recent AutoClock log"),
+                        daemon=True
+                    ).start()
+
+
+                # ---------------------------
+                # NEW COMMANDS ADDED HERE
+                # ---------------------------
+
+                elif text.startswith("/setfolder"):
+                    parts = text.split()
+                    if len(parts) != 2 or not parts[1].isdigit():
+                        notify("Usage: /setfolder <1-6>", chat_id)
+                    else:
+                        f = int(parts[1])
+                        if not (1 <= f <= 3):
+                            notify("Folder must be between 1 and 3.", chat_id)
+                        else:
+                            update_state(preferred_folder=str(f), preferred_image=None)
+                            notify(f"✅ Preferred folder set to {f}. Will be used for next punch only.", chat_id)
+
+                elif text.startswith("/setimage"):
+                    parts = text.split()
+                    if len(parts) != 2:
+                        notify("Usage: /setimage <filename>", chat_id)
+                    else:
+                        img = parts[1]
+                        update_state(preferred_image=img)
+                        notify(f"🔄 Preferred image set to {img}. It will NOT be used for next punch.", chat_id)
+
+                elif text.startswith("/clearprefer"):
+                    update_state(preferred_image=None, preferred_folder=None)
+                    notify("🧹 Cleared preferred folder & image overrides.", chat_id)
+
+
+                # --- NEW INSPECTION COMMANDS ---
+
+                elif text.startswith("/todayoutfit"):
+                    st = get_state()
+                    notify(
+                        f"📁 Today's folder: {st.get('last_used_folder')}\n"
+                        f"📁 Yesterday's folder: {st.get('yesterday_last_folder')}",
+                        chat_id
+                    )
+
+                elif text.startswith("/daylog"):
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("SELECT * FROM punch_log WHERE punch_date=? ORDER BY id ASC", (now_date_str(),))
+                    rows = cur.fetchall()
+                    conn.close()
+                    if not rows:
+                        notify("No punches today.", chat_id)
+                    else:
+                        msg = "📅 Today's Punch Log:\n"
+                        for r in rows:
+                            msg += f"- {r['punch_time']} | {r['action']} | folder={r['folder_used']} | {r['image_used']}\n"
+                        notify(msg, chat_id)
+
+                elif text.startswith("/history"):
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT * FROM punch_log
+                        WHERE punch_date >= date('now','-7 days')
+                        ORDER BY punch_date DESC, id ASC
+                    """)
+                    rows = cur.fetchall()
+                    conn.close()
+
+                    if not rows:
+                        notify("No logs found for last 7 days.", chat_id)
+                    else:
+                        msg = "📜 Last 7 Days:\n"
+                        last_date = ""
+                        for r in rows:
+                            if r["punch_date"] != last_date:
+                                msg += f"\n📅 {r['punch_date']}\n"
+                                last_date = r["punch_date"]
+                            msg += f"  - {r['punch_time']} | {r['action']} | folder={r['folder_used']}\n"
+                        notify(msg, chat_id)
+
+                elif text.startswith("/debugnext"):
+                    dt, act = next_event_datetime_and_type_db()
+                    notify(
+                        f"🔍 Debug Next Event:\nAction: {act}\nTime: {dt.strftime('%Y-%m-%d %I:%M %p')}",
+                        chat_id
+                    )
+
+
+                # ---------------------------
+                # Persist updates
+                # ---------------------------
 
                 if changed:
-                    # persist state row updated via update_state
                     pass
+
 
         except Exception:
             logger.exception("Exception in telegram_command_listener")
